@@ -324,40 +324,4 @@ impl PlayerData {
             })
             .collect()
     }
-
-    pub fn check_num_weapons(&self, items: &[Item]) -> u32 {
-        items.iter().fold(0, |agg, item| {
-            if !item.has_equip() {
-                return agg;
-            }
-            let equip = item.equip();
-
-            if !equip.has_weapon() {
-                return agg;
-            }
-
-            return agg + 1;
-        })
-    }
-
-    pub fn has_items(&self) -> bool {
-        !self.items.is_empty()
-    }
-
-    pub fn has_characters(&self) -> bool {
-        !self.characters.is_empty()
-    }
-
-    pub fn has_achievements(&self) -> bool {
-        !self.achievements.is_empty()
-    }
-
-    pub fn check_num_characters(&self, characters: &[AvatarInfo]) -> u32 {
-        characters.iter().fold(0, |agg, character| {
-            if character.avatar_type != 1 {
-                return agg;
-            }
-            return agg + 1;
-        })
-    }
 }

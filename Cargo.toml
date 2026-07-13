@@ -1,6 +1,6 @@
 [package]
 name = "irminsul"
-version = "0.1.12"
+version = "0.1.19"
 authors = ["Konkers <konkers@konkers.net>"]
 edition = "2024"
 include = ["LICENSE-APACHE", "LICENSE-MIT", "**/*.rs", "Cargo.toml"]
@@ -11,11 +11,20 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu", "wasm32-unknown-unknown"]
 
 [dependencies]
-anime-game-data = { git = "https://github.com/konkers/anime-game-data", rev = "d5dc51754ac96d65ad1201c85cd03cc9dc35bb72" }
+# Keep these in sync with build-dependencies below
+anime-game-data = { git = "https://github.com/konkers/anime-game-data", rev = "df004591478efaedb995a425256b8ee535e36eee" }
+flate2 = "1.1.9"
+tokio = { version = "1.47.1", features = [
+	"rt",
+	"tokio-macros",
+	"macros",
+	"rt-multi-thread",
+] }
+
 anyhow = "1.0.99"
 async-trait = "0.1.89"
 async-watcher = "0.3.0"
-auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "00ea7c806a0191ea3fb6793dac59350e0508ddc2" }
+auto-artifactarium = { git = "https://github.com/konkers/auto-artifactarium", rev = "b0338e65d8bebb84149feaada5910f7d2251056f" }
 base64 = "0.22.1"
 chrono = "0.4.42"
 clap = { version = "4.5.47", features = ["derive"] }
@@ -47,12 +56,6 @@ self_update = "0.42.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.143", features = ["alloc"] }
 tempfile = "3.21.0"
-tokio = { version = "1.47.1", features = [
-	"rt",
-	"tokio-macros",
-	"macros",
-	"rt-multi-thread",
-] }
 tokio-util = "0.7.16"
 tracing = { version = "0.1.41" }
 tracing-appender = "0.2.3"
@@ -71,6 +74,16 @@ caps = "0.5.6"
 libc = "0.2.177"
 
 [build-dependencies]
+# Keep these in sync with dependencies above
+anime-game-data = { git = "https://github.com/konkers/anime-game-data", rev = "df004591478efaedb995a425256b8ee535e36eee" }
+flate2 = "1.1.9"
+tokio = { version = "1.47.1", features = [
+	"rt",
+	"tokio-macros",
+	"macros",
+	"rt-multi-thread",
+] }
+
 winresource = "0.1.23"
 
 [features]

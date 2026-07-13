@@ -167,8 +167,6 @@ fn main() -> eframe::Result {
         admin::ensure_admin();
     }
 
-    let capture_backend = args.capture_backend;
-
     let background_image_size = [1600., 1000.];
 
     let native_options = eframe::NativeOptions {
@@ -191,7 +189,7 @@ fn main() -> eframe::Result {
             Ok(Box::new(app::IrminsulApp::new(
                 cc,
                 reload_handle,
-                capture_backend,
+                args.capture_backend,
             )))
         }),
     )
@@ -200,7 +198,6 @@ fn main() -> eframe::Result {
 fn log_dir() -> Result<PathBuf> {
     let mut dir = eframe::storage_dir(APP_ID).context("Storage dir not found")?;
     dir.push("log");
-    println!("Log folder: {}", dir.display());
     Ok(dir)
 }
 

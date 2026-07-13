@@ -11,12 +11,13 @@ use auto_artifactarium::{
 };
 use base64::prelude::*;
 use chrono::prelude::*;
+use flate2::read::GzDecoder;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::capture::{BackendType, create_capture};
 use crate::player_data::PlayerData;
-use crate::{APP_ID, AppState, ConfirmationType, DataUpdated, Message, State};
+use crate::{APP_ID, AppState, DataUpdated, Message, State};
 
 struct AppStateManager {
     app_state: AppState,
@@ -149,56 +150,23 @@ impl Monitor {
             }
 
             if let Some(items) = matches_item_packet(&command) {
-                // Ignore empty packets if we already have data
-                if items.is_empty() && self.player_data.has_items() {
-                    tracing::info!("Ignoring empty item packet, already have data");
-                } else if items.is_empty() {
-                    tracing::info!("Ignoring empty item packet");
-                } else if self.player_data.check_num_weapons(&items) >= 6
-                //6 guaranteed different free characters by AR18
-                {
-                    self.player_data.process_items(&items);
-                    tracing::info!("Found item packet with {} items", items.len());
-                    updated.items_updated = Some(Instant::now());
-                    has_new_data = true;
-                } else {
-                    tracing::info!(
-                        "Packet with {} items determined to be false positive. Discarded.",
-                        items.len()
-                    );
-                }
+                tracing::info!("Found item packet with {} items", items.len());
+                self.player_data.process_items(&items);
+                updated.items_updated = Some(Instant::now());
+                has_new_data = true;
             } else if let Some(avatars) = matches_avatar_packet(&command) {
-                // Ignore empty packets if we already have data
-                if avatars.is_empty() && self.player_data.has_characters() {
-                    tracing::info!("Ignoring empty avatar packet, already have data");
-                } else if avatars.is_empty() {
-                    tracing::info!("Ignoring empty avatar packet");
-                } else if self.player_data.check_num_characters(&avatars) >= 6 {
-                    tracing::info!("Found avatar packet with {} avatars", avatars.len());
-                    self.player_data.process_characters(&avatars);
-                    updated.characters_updated = Some(Instant::now());
-                    has_new_data = true;
-                } else {
-                    tracing::info!(
-                        "Packet with {} avatars determined to be false positive. Discarded.",
-                        avatars.len()
-                    );
-                }
+                tracing::info!("Found avatar packet with {} avatars", avatars.len());
+                self.player_data.process_characters(&avatars);
+                updated.characters_updated = Some(Instant::now());
+                has_new_data = true;
             } else if let Some(achievements) = matches_achievement_packet(&command) {
-                // Ignore empty packets if we already have data
-                if achievements.is_empty() && self.player_data.has_achievements() {
-                    tracing::info!("Ignoring empty achievement packet, already have data");
-                } else if achievements.is_empty() {
-                    tracing::info!("Ignoring empty achievement packet");
-                } else {
-                    tracing::info!(
-                        "Found achievement packet with {} achievements",
-                        achievements.len()
-                    );
-                    self.player_data.process_achievements(&achievements);
-                    updated.achievements_updated = Some(Instant::now());
-                    has_new_data = true;
-                }
+                tracing::info!(
+                    "Found achievement packet with {} achievements",
+                    achievements.len()
+                );
+                self.player_data.process_achievements(&achievements);
+                updated.achievements_updated = Some(Instant::now());
+                has_new_data = true;
             }
         }
 
@@ -210,30 +178,13 @@ impl Monitor {
 
 async fn get_database(
     app_state: &mut AppStateManager,
-    ui_message_rx: &mut mpsc::UnboundedReceiver<Message>,
+    _ui_message_rx: &mut mpsc::UnboundedReceiver<Message>,
 ) -> Result<AnimeGameData> {
     app_state.update_app_state(State::CheckingForData);
 
-    let mut storage_dir = eframe::storage_dir(APP_ID).unwrap();
-    storage_dir.push("data_cache.json");
-
-    let mut db = anime_game_data::AnimeGameData::new_with_cache(&storage_dir).unwrap();
-    if db.needs_update().await? {
-        let confirmation_type = if db.has_data() {
-            ConfirmationType::Update
-        } else {
-            ConfirmationType::Initial
-        };
-        app_state.update_app_state(State::WaitingForDownloadConfirmation(confirmation_type));
-
-        while let Some(msg) = ui_message_rx.recv().await {
-            if matches!(msg, Message::DownloadAcknowledged) {
-                app_state.update_app_state(State::Downloading);
-                db.update().await?;
-                break;
-            }
-        }
-    }
+    static DATABASE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/game_data.gz"));
+    let reader = GzDecoder::new(DATABASE);
+    let db = anime_game_data::AnimeGameData::new_from_reader(reader)?;
 
     Ok(db)
 }
