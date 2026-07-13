@@ -1,215 +1,120 @@
-// Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex "&{$((New-Object System.Net.WebClient).DownloadString('https://gist.github.com/MadeBaruna/1d75c1d37d19eca71591ec8a31178235/raw/getlink.ps1'))} global"
-
-use std::env;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
-// RecommendedWatcher is ReadDirectoryChangesWatcher on Windows, and INotifyWatcher on Linux
-use async_watcher::notify::{RecommendedWatcher, RecursiveMode};
-use async_watcher::{AsyncDebouncer, DebouncedEvent};
-use regex::Regex;
-use reqwest::Url;
-use serde::Deserialize;
-use tokio::fs;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 pub struct Wish {
     url_tx: watch::Sender<Option<String>>,
-    output_log_path: Option<PathBuf>,
-    web_cache_path: Option<PathBuf>,
-    debouncer: AsyncDebouncer<RecommendedWatcher>,
-    file_events: mpsc::Receiver<Result<Vec<DebouncedEvent>, Vec<async_watcher::notify::Error>>>,
-    prev_url: String,
+    first_packet_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl Wish {
-    pub async fn new(url_tx: watch::Sender<Option<String>>) -> Result<Self> {
-        // Don't fail if game not running yet - will retry in monitor()
-        let output_log_path = output_log_path().ok();
-        if output_log_path.is_none() {
-            tracing::info!("Game not detected yet, will retry when monitoring starts");
-        }
-        
-        let (debouncer, file_events) =
-            AsyncDebouncer::new_with_channel(Duration::from_secs(1), Some(Duration::from_secs(1)))
-                .await?;
+    pub async fn new(
+        url_tx: watch::Sender<Option<String>>,
+        first_packet_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<Self> {
         Ok(Self {
             url_tx,
-            output_log_path,
-            web_cache_path: None,
-            debouncer,
-            file_events,
-            prev_url: String::new(),
+            first_packet_rx: Some(first_packet_rx),
         })
     }
 
     pub async fn monitor(&mut self) -> Result<()> {
-        // Retry finding game if not found yet (lazy initialization)
-        loop {
-            if self.output_log_path.is_none() {
-                tracing::info!("Attempting to locate game for wish monitoring...");
-                self.output_log_path = output_log_path().ok();
-                
-                if self.output_log_path.is_none() {
-                    tracing::debug!("Game not running yet, will retry in 10 seconds");
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                    continue;
-                } else {
-                    tracing::info!("Game detected, starting wish monitoring");
-                }
-            }
-            
-            let output_log_path = self.output_log_path.as_ref().unwrap();
-
-            self.debouncer
-                .watcher()
-                .watch(&output_log_path, RecursiveMode::NonRecursive)?;
-
-            if let Err(e) = self.handle_log_update().await {
-                tracing::info!("handle log didn't find web cache dir: {e}");
-            }
-
-            break;
-        }
-
-        while let Some(Ok(events)) = self.file_events.recv().await {
-            for event in events {
-                if let Some(ref output_log_path) = self.output_log_path {
-                    if event.path == *output_log_path {
-                        if let Err(e) = self.handle_log_update().await {
-                            tracing::info!("handle log didn't find web cache dir: {e}");
-                        }
-                    } else if let Some(web_cache_dir) = &self.web_cache_path
-                        && &event.path == web_cache_dir
-                    {
-                        if let Err(e) = self.handle_web_cache_dir_update().await {
-                            tracing::info!("no url found in web cache dir: {e}");
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_log_update(&mut self) -> Result<()> {
-        tracing::debug!("output log path changed");
-
-        let web_cache_path = self.get_web_cache_path().await?;
-
-        // Unwatch the old path if we were previously watching to avoid leaking
-        // watchers.
-        if let Some(old_cache_path) = self.web_cache_path.take() {
-            tracing::debug!("unwatching old cache dir {old_cache_path:?}");
-            let _ = self.debouncer.watcher().unwatch(&old_cache_path);
-        }
-
-        tracing::debug!("watching new cache dir {web_cache_path:?}");
-        self.web_cache_path = Some(web_cache_path.clone());
-
-        let _ = self
-            .debouncer
-            .watcher()
-            .watch(&web_cache_path, RecursiveMode::NonRecursive);
-
-        if let Err(e) = self.handle_web_cache_dir_update().await {
-            tracing::info!("no url found in web cache dir: {e}");
-        }
-
-        Ok(())
-    }
-
-    async fn get_web_cache_path(&self) -> Result<PathBuf> {
-        let data_dir = self.get_data_dir().await?;
-        let mut web_cache_path = get_web_cache_dir(data_dir).await?;
-
-        web_cache_path.push("Cache/Cache_Data/data_2");
-
-        Ok(web_cache_path)
-    }
-
-    async fn get_data_dir(&self) -> Result<PathBuf> {
-        let output_log_path = self.output_log_path.as_ref()
-            .ok_or_else(|| anyhow!("output_log_path not initialized"))?;
-        let file = fs::File::open(output_log_path)
-            .await
-            .with_context(|| format!("could not open {output_log_path:?}"))?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-
-        let game_data_re = Regex::new(r"(?m).:[/\\].+(GenshinImpact_Data|YuanShen_Data)")?;
-        while let Some(line) = lines.next_line().await? {
-            if let Some(game_data_path) = game_data_re.captures_iter(&line).next()
-                && let Some(game_data_path) = game_data_path.get(0)
-            {
-                return Ok(game_data_path.as_str().into());
-            }
-        }
-
-        Err(anyhow!("Can't find game data path in {output_log_path:?}"))
-    }
-
-    async fn handle_web_cache_dir_update(&mut self) -> Result<()> {
-        tracing::info!("handling web cache dir update");
-        let Some(data_path) = &mut self.web_cache_path else {
+        tracing::info!("Wish monitoring waiting for first packet capture...");
+        let Some(rx) = self.first_packet_rx.take() else {
+            tracing::warn!("Wish monitor already started or no receiver");
             return Ok(());
         };
+        let _ = rx.await;
+        tracing::info!("First packet captured, attempting to extract wish URL from cache");
 
-        let data = fs::read(&data_path)
-            .await
-            .with_context(|| format!("could not open file {data_path:?}"))?;
-        let strings = String::from_utf8_lossy(&data);
-
-        let url_re = Regex::new("(https.+?webview_gacha.+?game_biz=)")?;
-
-        let url = url_re
-            .captures_iter(&strings)
-            .filter_map(|c| c.get(0).map(|s| s.as_str().to_string()))
-            .last()
-            .ok_or_else(|| anyhow!("Can't find URL in {data_path:?}"))?;
-
-        // Don't attempt to validate the same URL more than once.
-        if url == self.prev_url {
-            return Ok(());
+        match extract_wish_url_from_cache().await {
+            Ok(url) => {
+                tracing::info!("Successfully extracted wish URL");
+                let _ = self.url_tx.send(Some(url));
+            }
+            Err(e) => {
+                tracing::error!("Failed to extract wish URL: {e}");
+            }
         }
-
-        validate_url(&url).await?;
-
-        tracing::info!("found {url}");
-        self.prev_url = url.to_string();
-        let _ = self.url_tx.send(Some(url));
 
         Ok(())
     }
 }
 
-fn output_log_path() -> Result<PathBuf> {
-    // Windows native
-    if let Ok(user_profile) = env::var("userprofile") {
-        let mut output_log_path = PathBuf::from(user_profile);
-        output_log_path.push("AppData/LocalLow/miHoYo/Genshin Impact/output_log.txt");
-        return Ok(output_log_path);
+async fn extract_wish_url_from_cache() -> Result<String> {
+    // Find game process to get install directory
+    let game_dir = find_game_directory()?;
+    
+    let web_cache_base = game_dir.join("GenshinImpact_Data/webCaches");
+    if !web_cache_base.exists() {
+        return Err(anyhow!("webCaches directory not found at {}", web_cache_base.display()));
     }
 
-    // Linux - find running game and get WINEPREFIX
-    let wineprefix = find_game_wineprefix()
-        .context("Game not running or WINEPREFIX not found")?;
+    // Find newest cache folder (version numbered like 2.52.0.0)
+    let mut newest_version: Option<(String, PathBuf)> = None;
     
-    let users_dir = PathBuf::from(&wineprefix).join("drive_c/users");
-    for entry in std::fs::read_dir(users_dir)? {
-        let path = entry?.path().join("AppData/LocalLow/miHoYo/Genshin Impact/output_log.txt");
-        if path.exists() {
-            return Ok(path);
+    for entry in std::fs::read_dir(&web_cache_base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        
+        // Check if it's a version folder (all chars are digits or dots)
+        if name_str.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            if newest_version.is_none() || Some(name.clone()) > newest_version.as_ref().map(|(_, p)| p.file_name().unwrap().to_owned()) {
+                newest_version = Some((name_str.to_string(), path));
+            }
         }
     }
 
-    Err(anyhow!("output_log.txt not found in WINEPREFIX {wineprefix}"))
+    let (version, cache_dir) = newest_version
+        .ok_or_else(|| anyhow!("No version folders found in webCaches"))?;
+    
+    tracing::info!("Using cache version: {version}");
+    
+    let cache_file = cache_dir.join("Cache/Cache_Data/data_2");
+    if !cache_file.exists() {
+        return Err(anyhow!("Cache data file not found: {}", cache_file.display()));
+    }
+
+    // Read cache file and search for wish URL
+    let cache_data = std::fs::read(&cache_file)
+        .context("Failed to read cache file")?;
+    
+    let cache_str = String::from_utf8_lossy(&cache_data);
+    
+    // Find line containing wish gacha URL
+    for line in cache_str.lines().rev() {
+        if line.contains("e20190909gacha") && line.contains("/index.html") {
+            // Extract URL between https:// and null terminators
+            if let Some(start) = line.find("https://") {
+                let remaining = &line[start..];
+                // Find end (either null bytes or end of line)
+                let end = remaining.find("\0\0\0\0")
+                    .or_else(|| remaining.find('\0'))
+                    .unwrap_or(remaining.len());
+                
+                let url = &remaining[..end];
+                
+                // Validate it's a proper wish URL
+                if url.contains("authkey") && url.contains("hoyoverse.com") {
+                    tracing::info!("Found wish URL in cache");
+                    return Ok(url.to_string());
+                }
+            }
+        }
+    }
+    
+    Err(anyhow!("No wish URL found in cache - open wish history in-game first"))
 }
 
-fn find_game_wineprefix() -> Result<String> {
+fn find_game_directory() -> Result<PathBuf> {
+    // Scan /proc for GenshinImpact process
     for entry in std::fs::read_dir("/proc")?.filter_map(Result::ok) {
         let Ok(pid_str) = entry.file_name().into_string() else { continue };
         let Ok(_pid) = pid_str.parse::<u32>() else { continue };
@@ -218,64 +123,16 @@ fn find_game_wineprefix() -> Result<String> {
         let Ok(comm) = std::fs::read_to_string(&comm_path) else { continue };
         
         if comm.trim().contains("GenshinImpact") {
-            let environ_path = format!("/proc/{}/environ", pid_str);
-            let Ok(environ) = std::fs::read(&environ_path) else { continue };
-            
-            for var in environ.split(|&b| b == 0) {
-                let var_str = String::from_utf8_lossy(var);
-                if let Some(prefix) = var_str.strip_prefix("WINEPREFIX=") {
-                    return Ok(prefix.to_string());
-                }
+            // Get working directory of the process
+            let cwd_link = format!("/proc/{}/cwd", pid_str);
+            if let Ok(cwd) = std::fs::read_link(&cwd_link) {
+                tracing::info!("Found game at: {}", cwd.display());
+                // CWD is usually "<install>/Genshin Impact"
+                // We need the parent for GenshinImpact_Data
+                return Ok(cwd);
             }
         }
     }
     
-    Err(anyhow!("GenshinImpact process not found"))
-}
-
-async fn get_web_cache_dir(data_dir: PathBuf) -> Result<PathBuf> {
-    let mut web_caches = data_dir;
-    web_caches.push("webCaches");
-    let mut dir = fs::read_dir(&web_caches)
-        .await
-        .with_context(|| format!("could not open directory {web_caches:?}"))?;
-    let mut latest_dir = (SystemTime::UNIX_EPOCH, None);
-    while let Some(entry) = dir.next_entry().await? {
-        let metadata = entry.metadata().await?;
-        if !metadata.is_dir() {
-            continue;
-        }
-        let modified = metadata.modified()?;
-        if modified > latest_dir.0 {
-            latest_dir = (modified, Some(entry.path()))
-        }
-    }
-
-    latest_dir
-        .1
-        .ok_or_else(|| anyhow!("Unable to find directory in {web_caches:?}"))
-}
-
-async fn validate_url(url: &str) -> Result<()> {
-    let url = Url::parse_with_params(
-        url,
-        &[
-            ("lang", "en"),
-            ("gacha_type", "301"),
-            ("size", "5"),
-            ("lang", "en-us"),
-        ],
-    )?;
-
-    #[derive(Deserialize)]
-    struct Response {
-        retcode: i32,
-    }
-
-    let response: Response = reqwest::get(url).await?.error_for_status()?.json().await?;
-    if response.retcode != 0 {
-        return Err(anyhow!("error code: {}", response.retcode));
-    }
-
-    Ok(())
+    Err(anyhow!("GenshinImpact process not found - is the game running?"))
 }

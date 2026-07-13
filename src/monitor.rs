@@ -58,6 +58,7 @@ pub struct Monitor {
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     capture_backend: BackendType,
+    first_packet_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl Monitor {
@@ -66,6 +67,7 @@ impl Monitor {
         mut ui_message_rx: mpsc::UnboundedReceiver<Message>,
         log_packet_rx: watch::Receiver<bool>,
         capture_backend: BackendType,
+        first_packet_tx: tokio::sync::oneshot::Sender<()>,
     ) -> Result<Self> {
         let mut app_state = AppStateManager::new(state_tx.borrow().clone(), state_tx.clone());
         let game_data = get_database(&mut app_state, &mut ui_message_rx).await?;
@@ -84,6 +86,7 @@ impl Monitor {
             packet_tx,
             packet_rx,
             capture_backend,
+            first_packet_tx: Some(first_packet_tx),
         })
     }
 
@@ -171,6 +174,11 @@ impl Monitor {
         }
 
         if has_new_data {
+            // Signal wish monitoring on first packet capture
+            if let Some(tx) = self.first_packet_tx.take() {
+                tracing::info!("First packet captured, signaling wish monitoring to start");
+                let _ = tx.send(());
+            }
             self.app_state.update_timestamps(updated);
         }
     }

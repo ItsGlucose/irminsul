@@ -14,7 +14,7 @@ use egui::{
 use egui_file_dialog::FileDialog;
 use egui_notify::Toasts;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch, oneshot};
 
 use crate::monitor::Monitor;
 use crate::player_data::ExportSettings;
@@ -135,9 +135,10 @@ fn start_async_runtime(
                 tracing::error!("error checking for update: {e}");
             }
 
-            // Check for wish URL
+            // Wish monitoring starts after first packet captured (signal from Monitor)
+            let (first_packet_tx, first_packet_rx) = oneshot::channel();
             tokio::spawn(async move {
-                let Ok(mut wish) = wish::Wish::new(wish_url_tx).await else {
+                let Ok(mut wish) = wish::Wish::new(wish_url_tx, first_packet_rx).await else {
                     tracing::error!("Failed to create new wish monitor");
                     return;
                 };
@@ -160,6 +161,7 @@ fn start_async_runtime(
                 ui_message_rx,
                 log_packets_rx,
                 capture_backend,
+                first_packet_tx,
             )
             .await
             {
