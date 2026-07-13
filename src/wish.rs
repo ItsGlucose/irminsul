@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, watch};
 
 pub struct Wish {
     url_tx: watch::Sender<Option<String>>,
-    output_log_path: PathBuf,
+    output_log_path: Option<PathBuf>,
     web_cache_path: Option<PathBuf>,
     debouncer: AsyncDebouncer<RecommendedWatcher>,
     file_events: mpsc::Receiver<Result<Vec<DebouncedEvent>, Vec<async_watcher::notify::Error>>>,
@@ -26,7 +26,12 @@ pub struct Wish {
 
 impl Wish {
     pub async fn new(url_tx: watch::Sender<Option<String>>) -> Result<Self> {
-        let output_log_path = output_log_path()?;
+        // Don't fail if game not running yet - will retry in monitor()
+        let output_log_path = output_log_path().ok();
+        if output_log_path.is_none() {
+            tracing::info!("Game not detected yet, will retry when monitoring starts");
+        }
+        
         let (debouncer, file_events) =
             AsyncDebouncer::new_with_channel(Duration::from_secs(1), Some(Duration::from_secs(1)))
                 .await?;
@@ -41,27 +46,47 @@ impl Wish {
     }
 
     pub async fn monitor(&mut self) -> Result<()> {
-        let output_log_path = output_log_path()?;
+        // Retry finding game if not found yet (lazy initialization)
+        loop {
+            if self.output_log_path.is_none() {
+                tracing::info!("Attempting to locate game for wish monitoring...");
+                self.output_log_path = output_log_path().ok();
+                
+                if self.output_log_path.is_none() {
+                    tracing::debug!("Game not running yet, will retry in 10 seconds");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    continue;
+                } else {
+                    tracing::info!("Game detected, starting wish monitoring");
+                }
+            }
+            
+            let output_log_path = self.output_log_path.as_ref().unwrap();
 
-        self.debouncer
-            .watcher()
-            .watch(&output_log_path, RecursiveMode::NonRecursive)?;
+            self.debouncer
+                .watcher()
+                .watch(&output_log_path, RecursiveMode::NonRecursive)?;
 
-        if let Err(e) = self.handle_log_update().await {
-            tracing::info!("handle log didn't find web cache dir: {e}");
+            if let Err(e) = self.handle_log_update().await {
+                tracing::info!("handle log didn't find web cache dir: {e}");
+            }
+
+            break;
         }
 
         while let Some(Ok(events)) = self.file_events.recv().await {
             for event in events {
-                if event.path == output_log_path {
-                    if let Err(e) = self.handle_log_update().await {
-                        tracing::info!("handle log didn't find web cache dir: {e}");
-                    }
-                } else if let Some(web_cache_dir) = &self.web_cache_path
-                    && &event.path == web_cache_dir
-                {
-                    if let Err(e) = self.handle_web_cache_dir_update().await {
-                        tracing::info!("no url found in web cache dir: {e}");
+                if let Some(ref output_log_path) = self.output_log_path {
+                    if event.path == *output_log_path {
+                        if let Err(e) = self.handle_log_update().await {
+                            tracing::info!("handle log didn't find web cache dir: {e}");
+                        }
+                    } else if let Some(web_cache_dir) = &self.web_cache_path
+                        && &event.path == web_cache_dir
+                    {
+                        if let Err(e) = self.handle_web_cache_dir_update().await {
+                            tracing::info!("no url found in web cache dir: {e}");
+                        }
                     }
                 }
             }
@@ -107,7 +132,8 @@ impl Wish {
     }
 
     async fn get_data_dir(&self) -> Result<PathBuf> {
-        let output_log_path = &self.output_log_path;
+        let output_log_path = self.output_log_path.as_ref()
+            .ok_or_else(|| anyhow!("output_log_path not initialized"))?;
         let file = fs::File::open(output_log_path)
             .await
             .with_context(|| format!("could not open {output_log_path:?}"))?;
