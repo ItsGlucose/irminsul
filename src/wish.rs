@@ -161,12 +161,50 @@ impl Wish {
 }
 
 fn output_log_path() -> Result<PathBuf> {
-    let user_profile = env::var("userprofile").context("could not find userprofile var")?;
-    let mut output_log_path = PathBuf::from(user_profile);
-    // TODO: support Chinese version path
-    output_log_path.push("AppData/LocalLow/miHoYo/Genshin Impact/output_log.txt");
+    // Windows native
+    if let Ok(user_profile) = env::var("userprofile") {
+        let mut output_log_path = PathBuf::from(user_profile);
+        output_log_path.push("AppData/LocalLow/miHoYo/Genshin Impact/output_log.txt");
+        return Ok(output_log_path);
+    }
 
-    Ok(output_log_path)
+    // Linux - find running game and get WINEPREFIX
+    let wineprefix = find_game_wineprefix()
+        .context("Game not running or WINEPREFIX not found")?;
+    
+    let users_dir = PathBuf::from(&wineprefix).join("drive_c/users");
+    for entry in std::fs::read_dir(users_dir)? {
+        let path = entry?.path().join("AppData/LocalLow/miHoYo/Genshin Impact/output_log.txt");
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err(anyhow!("output_log.txt not found in WINEPREFIX {wineprefix}"))
+}
+
+fn find_game_wineprefix() -> Result<String> {
+    for entry in std::fs::read_dir("/proc")?.filter_map(Result::ok) {
+        let Ok(pid_str) = entry.file_name().into_string() else { continue };
+        let Ok(_pid) = pid_str.parse::<u32>() else { continue };
+        
+        let comm_path = format!("/proc/{}/comm", pid_str);
+        let Ok(comm) = std::fs::read_to_string(&comm_path) else { continue };
+        
+        if comm.trim().contains("GenshinImpact") {
+            let environ_path = format!("/proc/{}/environ", pid_str);
+            let Ok(environ) = std::fs::read(&environ_path) else { continue };
+            
+            for var in environ.split(|&b| b == 0) {
+                let var_str = String::from_utf8_lossy(var);
+                if let Some(prefix) = var_str.strip_prefix("WINEPREFIX=") {
+                    return Ok(prefix.to_string());
+                }
+            }
+        }
+    }
+    
+    Err(anyhow!("GenshinImpact process not found"))
 }
 
 async fn get_web_cache_dir(data_dir: PathBuf) -> Result<PathBuf> {
